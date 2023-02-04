@@ -1,0 +1,12 @@
+[Unit]
+Description=shell2http
+
+[Service]
+Type=simple
+EnvironmentFile=/home/user/s2h.env
+ExecStart=/usr/local/bin/shell2http -export-vars XDG_RUNTIME_DIR  -show-errors -include-stderr -form -port 9999 /admin "./s2h_admin.py" $SH_ROUTES
+WorkingDirectory=/home/user/
+Restart=always
+
+[Install]
+WantedBy=default.target
