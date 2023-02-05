@@ -1,12 +1,16 @@
 #!/usr/bin/env python
 import os
 import shlex
+import subprocess
 import sys
+import threading
+import time
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
 from string import Template
 
+UNIT_NAME = "shell2http.service"
 THIS_DIR = Path(__file__).resolve().parent
 ENV_FILE = THIS_DIR / "s2h.env"
 PAGES = {}
@@ -249,6 +253,8 @@ class Html:
 
     @staticmethod
     def render(elem):
+        if isinstance(elem, HtmlElement):
+            elem = elem()
         return ET.tostring(elem, "unicode")
 
 
@@ -282,7 +288,10 @@ def page_router(variables):
 
 @page("routing")
 def routing(submit=None, **form):
-    settings = parse_env_file(ENV_FILE.read_text())
+    try:
+        settings = parse_env_file(ENV_FILE.read_text())
+    except FileNotFoundError:
+        settings = {}
 
     if submit:
         settings["SH_ROUTES"] = encode_routes(parse_routes_from_form(form))
@@ -366,6 +375,58 @@ def authentication(submit=None, username="", password=""):
     )
     return Html.render(form)
 
+
+@page("service")
+def service(restart=None, **kw):
+    output = "cat"
+    lines = 50
+    journalctl = subprocess.run(
+        [
+            "journalctl",
+            "--user",
+            f"--output={output}",
+            f"--lines={lines}",
+            f"--unit={UNIT_NAME}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    systemctl = subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            f"--output={output}",
+            "status",
+            UNIT_NAME,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if restart:
+        subprocess.run('systemctl --user --no-block restart shell2http', shell=True)
+    reload_js = "setTimeout(function(){window.location.href=window.location.href},5000)"
+    container = h.div(
+        h.form(method="post")(
+            h.input(type="submit", name="restart", value="Restart"),
+            " ",
+            h.input(type="text", value=f"{restart}", readonly=True),
+        ),
+        h.h2("Status"),
+        h.pre(h.code(systemctl.stdout)),
+        h.h2("Logs"),
+        h.pre(h.code(journalctl.stdout)),
+        h.script(reload_js) if restart else None,
+    )
+    return Html.render(container)
+
+
+# Systemd control
+
+
+def restart_with_delay(delay=1):
+    def _restart():
+        subprocess.Popen("sleep 1 && systemctl --user restart shell2http", shell=True)
+    threading.Thread(target=_restart, daemon=True).start()
 
 # Parse and encode utils
 
