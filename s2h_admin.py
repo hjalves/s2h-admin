@@ -1,18 +1,28 @@
 #!/usr/bin/env python
+import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
-import threading
-import time
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
 from string import Template
 
+# Constants and configuration
+
+PORT = 9999
+ADMIN_ROUTE = "/admin"
 UNIT_NAME = "shell2http.service"
+HOME_DIR = Path.home()
 THIS_DIR = Path(__file__).resolve().parent
 ENV_FILE = THIS_DIR / "s2h.env"
+SYSTEMD_CTL = ["systemctl", "--user"]
+JOURNAL_CTL = ["journalctl", "--user"]
+
+# Global data
+
 PAGES = {}
 
 # Templates and CSS
@@ -21,7 +31,8 @@ CSS = """
 /* Body */
 html {
   font-size: 50%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", 
+    Arial, "Noto Sans", sans-serif;
 }
 body {
   font-size: 1.8rem;
@@ -44,7 +55,8 @@ body {
 }
 h1, h2, h3, h4, h5, h6 {
   line-height: 1.1;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", 
+    Arial, "Noto Sans", sans-serif;
   font-weight: 700;
   margin-top: 3rem;
   margin-bottom: 1.5rem;
@@ -169,11 +181,16 @@ textarea {
   cursor: pointer;
   box-sizing: border-box;
 }
-.button[disabled], button[disabled], input[type="submit"][disabled], input[type="reset"][disabled], input[type="button"][disabled] {
+.button[disabled], button[disabled], input[type="submit"][disabled], 
+    input[type="reset"][disabled], input[type="button"][disabled] {
   cursor: default;
   opacity: .5;
 }
-.button:focus:enabled, .button:hover:enabled, button:focus:enabled, button:hover:enabled, input[type="submit"]:focus:enabled, input[type="submit"]:hover:enabled, input[type="reset"]:focus:enabled, input[type="reset"]:hover:enabled, input[type="button"]:focus:enabled, input[type="button"]:hover:enabled {
+.button:focus:enabled, .button:hover:enabled, button:focus:enabled, 
+    button:hover:enabled, input[type="submit"]:focus:enabled, 
+    input[type="submit"]:hover:enabled, input[type="reset"]:focus:enabled, 
+    input[type="reset"]:hover:enabled, input[type="button"]:focus:enabled, 
+    input[type="button"]:hover:enabled {
   background-color: #c9c9c9;
   border-color: #c9c9c9;
   color: #222222;
@@ -220,6 +237,26 @@ $content
 <footer>$footer</footer>
 </body>
 </html>"""
+)
+
+
+UNIT_FILE_TEMPLATE = Template(
+    f"""[Unit]
+Description=shell2http
+
+[Service]
+Type=simple
+EnvironmentFile=$environment_file
+ExecStart=$shell2http_bin \\
+    -export-vars XDG_RUNTIME_DIR -show-errors -include-stderr -form -port \\
+    {PORT} {ADMIN_ROUTE} "$script_rel_path" $$SH_ROUTES
+WorkingDirectory=$working_dir
+Restart=always
+ExecStop=sleep 1
+
+[Install]
+WantedBy=default.target
+"""
 )
 
 
@@ -317,14 +354,14 @@ def routing(submit=None, **form):
 
 def routing_render_rows(routes, extra=1):
     route_list = [
-        (num, path, command) for num, (path, command) in enumerate(routes.items())
+        (i, path, command) for i, (path, command) in enumerate(routes.items())
     ] + [(i, "", "") for i in range(len(routes), len(routes) + extra)]
 
     return [
         h.tr(
             h.td(h.input(id=f"path_{i}", name=f"path_{i}", type="text", value=path)),
             h.td(
-                h.input(id=f"com_{i}", name=f"com_{i}", type="text", value=com, size=40)
+                h.input(id=f"cmd_{i}", name=f"cmd_{i}", type="text", value=cmd, size=40)
             ),
             h.td(
                 h.input(type="button", onclick=f"window.open('{path}');", value="Go")
@@ -332,7 +369,7 @@ def routing_render_rows(routes, extra=1):
                 else "-"
             ),
         )
-        for (i, path, com) in route_list
+        for (i, path, cmd) in route_list
     ]
 
 
@@ -380,55 +417,42 @@ def authentication(submit=None, username="", password=""):
 def service(restart=None, **kw):
     output = "cat"
     lines = 50
-    journalctl = subprocess.run(
-        [
-            "journalctl",
-            "--user",
-            f"--output={output}",
-            f"--lines={lines}",
-            f"--unit={UNIT_NAME}",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    systemctl = subprocess.run(
-        [
-            "systemctl",
-            "--user",
-            f"--output={output}",
-            "status",
-            UNIT_NAME,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    log_cmd = JOURNAL_CTL + [f"-o{output}", f"-n{lines}", f"-u{UNIT_NAME}"]
+    log_result = subprocess.run(log_cmd, capture_output=True, text=True)
+    log_result.check_returncode()
+
+    status_cmd = SYSTEMD_CTL + [f"-o{output}", "status", UNIT_NAME]
+    status_result = subprocess.run(status_cmd, capture_output=True, text=True)
+    status_result.check_returncode()
+
     if restart:
-        subprocess.run('systemctl --user --no-block restart shell2http', shell=True)
-    reload_js = "setTimeout(function(){window.location.href=window.location.href},5000)"
+        restart_service()
+
+    reload_js = "setTimeout(function(){window.location.href=window.location.href},4000)"
     container = h.div(
         h.form(method="post")(
             h.input(type="submit", name="restart", value="Restart"),
             " ",
-            h.input(type="text", value=f"{restart}", readonly=True),
+            h.input(
+                type="text", value="Restarting..." if restart else "-", readonly=True
+            ),
         ),
         h.h2("Status"),
-        h.pre(h.code(systemctl.stdout)),
+        h.pre(h.code(status_result.stdout)),
         h.h2("Logs"),
-        h.pre(h.code(journalctl.stdout)),
+        h.pre(h.code(log_result.stdout)),
         h.script(reload_js) if restart else None,
     )
     return Html.render(container)
 
 
-# Systemd control
+# Helpers and utils
 
 
-def restart_with_delay(delay=1):
-    def _restart():
-        subprocess.Popen("sleep 1 && systemctl --user restart shell2http", shell=True)
-    threading.Thread(target=_restart, daemon=True).start()
-
-# Parse and encode utils
+def restart_service():
+    cmd = SYSTEMD_CTL + ["--no-block", "restart", UNIT_NAME]
+    result = subprocess.run(cmd)
+    result.check_returncode()
 
 
 def parse_env_file(contents):
@@ -463,7 +487,7 @@ def parse_routes_from_form(form_data):
     for key in path_keys:
         if route := form_data.get(key):
             num = int(key[5:])
-            command = form_data.get(f"com_{num}", "")
+            command = form_data.get(f"cmd_{num}", "")
             routes[route] = command
     return routes
 
@@ -474,13 +498,12 @@ def parse_routes_from_form(form_data):
 def render():
     input_data = {k[2:]: v for k, v in os.environ.items() if k.startswith("v_")}
     title, content = page_router(input_data)
-    navigation = render_navigation()
     return HTML_TEMPLATE.substitute(
         {
             "title": title,
-            "navigation": navigation,
+            "navigation": render_navigation(),
             "content": content,
-            "footer": footer(),
+            "footer": render_footer(),
         }
     )
 
@@ -497,7 +520,7 @@ def env_debug():
     return "\n".join(f"{k}={v}" for k, v in os.environ.items())
 
 
-def footer():
+def render_footer():
     return f"""<hr>
     <details>
     <summary>env vars</summary>
@@ -506,9 +529,50 @@ def footer():
     """
 
 
+def find_shell2http_bin():
+    bin_path = shutil.which("shell2http")
+    if not bin_path:
+        search_paths = [THIS_DIR, HOME_DIR / "bin", HOME_DIR / ".local" / "bin"]
+        bin_path = shutil.which("shell2http", path=":".join(map(str, search_paths)))
+    return bin_path
+
+
 def main(args):
-    html_output = render()
-    print(html_output)
+    parser = argparse.ArgumentParser(
+        prog="s2h_admin", description="Web admin interface for shell2http"
+    )
+    parser.add_argument(
+        "command",
+        metavar="command",
+        nargs="?",
+        choices=["render", "unit-file", "serve"],
+        default="render",
+        help="command to run, can be 'render', 'unit-file' or 'serve'",
+    )
+    args = parser.parse_args()
+
+    if args.command == "render":
+        print(render())
+
+    elif args.command == "unit-file":
+        shell2http_bin = find_shell2http_bin()
+        if not shell2http_bin:
+            print("shell2http binary not found.")
+            return -1
+
+        working_dir = HOME_DIR
+        script_rel_path = THIS_DIR.relative_to(working_dir)
+        unit_file = UNIT_FILE_TEMPLATE.substitute(
+            {
+                "environment_file": ENV_FILE.absolute(),
+                "shell2http_bin": shell2http_bin,
+                "script_rel_path": script_rel_path,
+                "working_dir": working_dir,
+            }
+        )
+        print(unit_file)
+    elif args.command == "serve":
+        print("serve")
 
 
 if __name__ == "__main__":

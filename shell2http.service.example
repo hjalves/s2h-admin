@@ -7,6 +7,7 @@ EnvironmentFile=/home/user/s2h.env
 ExecStart=/usr/local/bin/shell2http -export-vars XDG_RUNTIME_DIR  -show-errors -include-stderr -form -port 9999 /admin "./s2h_admin.py" $SH_ROUTES
 WorkingDirectory=/home/user/
 Restart=always
+ExecStop=sleep 1
 
 [Install]
 WantedBy=default.target
