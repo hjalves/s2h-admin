@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
@@ -354,7 +355,8 @@ def routing(submit=None, **form):
             h.input(type="reset", value="Reset"),
         ),
     )
-    return Html.render(form)
+    section = h.section(form, h.p(f"{len(routes)} commands defined."))
+    return Html.render(section)
 
 
 def routing_render_rows(routes, extra=1):
@@ -388,7 +390,8 @@ def authentication(submit=None, username="", password=""):
         )
         ENV_FILE.write_text(encode_env_file(settings))
 
-    username, _, password = settings.get("SH_BASIC_AUTH", "").partition(":")
+    basic_auth = settings.get("SH_BASIC_AUTH", "")
+    username, _, password = basic_auth.partition(":")
 
     form = h.form(method="post")(
         h.fieldset(
@@ -415,7 +418,10 @@ def authentication(submit=None, username="", password=""):
             h.input(type="reset", value="Reset"),
         ),
     )
-    return Html.render(form)
+    section = h.section(
+        form, h.p("Authentication is " + ("enabled" if basic_auth else "disabled"))
+    )
+    return Html.render(section)
 
 
 @page("service")
@@ -434,7 +440,7 @@ def service(restart=None, **kw):
         restart_service()
 
     reload_js = "setTimeout(function(){window.location.href=window.location.href},4000)"
-    container = h.div(
+    section = h.section(
         h.form(method="post")(
             h.input(type="submit", name="restart", value="Restart"),
             " ",
@@ -448,7 +454,7 @@ def service(restart=None, **kw):
         h.pre(h.code(log_result.stdout)),
         h.script(reload_js) if restart else None,
     )
-    return Html.render(container)
+    return Html.render(section)
 
 
 # Helpers and utils
@@ -501,15 +507,17 @@ def parse_routes_from_form(form_data):
 
 
 def render(input_data=None):
+    start_time = time.time()
     if not input_data:
         input_data = {k[2:]: v for k, v in os.environ.items() if k.startswith("v_")}
     title, content = page_router(input_data)
+    navigation = render_navigation()
     return HTML_TEMPLATE.substitute(
         {
             "title": title,
-            "navigation": render_navigation(),
+            "navigation": navigation,
             "content": content,
-            "footer": render_footer(),
+            "footer": render_footer(start_time),
         }
     )
 
@@ -522,17 +530,11 @@ def render_navigation():
     return " | ".join(f'<a href="{href}">{name}</a>' for name, href in links)
 
 
-def env_debug():
-    return "\n".join(f"{k}={v}" for k, v in os.environ.items())
-
-
-def render_footer():
-    return f"""<hr>
-    <details>
-    <summary>debug</summary>
-    <pre><code>{env_debug()}</code></pre>
-    </details>
-    """
+def render_footer(start_time):
+    elapsed = time.time() - start_time
+    env = "\n".join(f"{k}={v}" for k, v in os.environ.items())
+    return f"""<hr>Page rendered in {1000 * elapsed:.2f} ms.<br>\
+    <details><summary>os.environ</summary><pre><code>{env}</code></pre></details>"""
 
 
 def find_shell2http_bin():
