@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import logging
 import os
 import shlex
 import shutil
@@ -9,10 +10,14 @@ import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
 from string import Template
+from urllib.parse import parse_qsl
+from wsgiref.simple_server import make_server
 
 # Constants and configuration
+logger = logging.getLogger()
 
-PORT = 9999
+S2H_PORT = 9999
+DEV_PORT = 9998
 ADMIN_ROUTE = "/admin"
 UNIT_NAME = "shell2http.service"
 HOME_DIR = Path.home()
@@ -25,7 +30,7 @@ JOURNAL_CTL = ["journalctl", "--user"]
 
 PAGES = {}
 
-# Templates and CSS
+# Templates
 
 CSS = """
 /* Body */
@@ -249,7 +254,7 @@ Type=simple
 EnvironmentFile=$environment_file
 ExecStart=$shell2http_bin \\
     -export-vars XDG_RUNTIME_DIR -show-errors -include-stderr -form -port \\
-    {PORT} {ADMIN_ROUTE} "$script_rel_path" $$SH_ROUTES
+    {S2H_PORT} {ADMIN_ROUTE} "$script_rel_path" $$SH_ROUTES
 WorkingDirectory=$working_dir
 Restart=always
 ExecStop=sleep 1
@@ -495,8 +500,9 @@ def parse_routes_from_form(form_data):
 # Main and render
 
 
-def render():
-    input_data = {k[2:]: v for k, v in os.environ.items() if k.startswith("v_")}
+def render(input_data=None):
+    if not input_data:
+        input_data = {k[2:]: v for k, v in os.environ.items() if k.startswith("v_")}
     title, content = page_router(input_data)
     return HTML_TEMPLATE.substitute(
         {
@@ -523,7 +529,7 @@ def env_debug():
 def render_footer():
     return f"""<hr>
     <details>
-    <summary>env vars</summary>
+    <summary>debug</summary>
     <pre><code>{env_debug()}</code></pre>
     </details>
     """
@@ -557,7 +563,7 @@ def main(args):
     elif args.command == "unit-file":
         shell2http_bin = find_shell2http_bin()
         if not shell2http_bin:
-            print("shell2http binary not found.")
+            print("shell2http binary not found.", file=sys.stderr)
             return -1
 
         working_dir = HOME_DIR
@@ -571,8 +577,41 @@ def main(args):
             }
         )
         print(unit_file)
+
     elif args.command == "serve":
-        print("serve")
+        print(f"Serving on http://localhost:{DEV_PORT}{ADMIN_ROUTE} ...")
+        httpd = make_server("localhost", DEV_PORT, wsgi)
+        httpd.serve_forever()
+
+
+# Development server
+
+
+def wsgi(environ, start_response):
+    try:
+        if not environ.get("PATH_INFO") == ADMIN_ROUTE:
+            raise LookupError(f"Not found. Use {ADMIN_ROUTE} path only.")
+
+        variables = dict(parse_qsl(environ.get("QUERY_STRING", "")))
+        method = environ["REQUEST_METHOD"]
+        content_type = environ.get("CONTENT_TYPE")
+
+        # Handle forms (not handling multipart/form-data as we don't have uploads)
+        if method == "POST" and content_type == "application/x-www-form-urlencoded":
+            payload = environ["wsgi.input"].read(int(environ["CONTENT_LENGTH"]))
+            variables.update(parse_qsl(payload.decode()))
+
+        status = "200 OK"
+        headers = [("Content-Type", "text/html")]
+        body = render(variables).encode()
+
+    except Exception as ex:
+        status = "500 Error"
+        headers = [("Content-Type", "text/plain")]
+        body = f"{ex.__class__.__name__}: {str(ex)}".encode()
+
+    start_response(status, headers)
+    return [body]
 
 
 if __name__ == "__main__":
